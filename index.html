@@ -1,0 +1,169 @@
+<html>
+<head>
+  <title>.chart cheap sustain fixer</title>
+  <style>
+html, body {
+  font-family: sans-serif;
+}
+  </style>
+</head>
+<body>
+<script>
+
+const getOffset = line => {
+  const [, index, query] = line.match(/(\d+) = E offset:(.+)/) || [];
+  if (!index) return [];
+  const [offset, note] = query.split(':');
+  return [{ index, note: +note, offset: +offset }];
+}
+
+const getBPM = line => {
+  const [, index, bpm1000] = line.match(/(\d+) = B (.+)/) || [];
+  if (!index) return [];
+  return [[+index, bpm1000 / 1000]];
+}
+
+const convert = source => {
+  const gap = Number(document.getElementById("gap").value) / 1000;
+  const lines = source.split("\n");
+  const RESOLUTION = +lines.find(x => x.match(/Resolution/)).split(' = ')[1];
+
+  const processedDiffs = new Set();
+  let start = 0;
+  while (start > -1) {
+    start = lines.findIndex(x => !processedDiffs.has(x) && x.match(/[A-z]+Single/));
+    if (start < 0) start = lines.findIndex(x => !processedDiffs.has(x) && x.match(/[A-z]+Guitar/));
+    if (start < 0) start = lines.findIndex(x => !processedDiffs.has(x) && x.match(/[A-z]+Bass/));
+    if (start < 0) break;
+    processedDiffs.add(lines[start]);
+    
+    const end = lines.slice(start).findIndex(x => x.match(/}/)) + start;
+
+    // Compute BPMs and timestamps
+    const bpms = [];
+    lines.forEach(line => {
+      bpms.push(...getBPM(line));
+    });
+
+    const notes = [];
+    const lineRange = lines.slice(start, end);
+
+    lineRange.forEach((line, i) => {
+      // Ignore entities that are not notes
+      if (!line.includes(' = N ')) {
+        return notes.push(line);
+      }
+      const [, index, note, length] = line.match(/(\d+) = N (\d) (\d+)/) || [];
+
+      notes.push({
+        raw: line,
+        time: 0,
+        timeEnd: 0,
+        note: +note,
+        index: +index,
+        length: +length
+      });
+    });
+
+
+    let time = 0;
+    let currentIndex;
+    let currentBpm;
+    let timingPoints = '';
+    bpms.forEach(([index, bpm]) => {
+      if (currentIndex != null) {
+        // does it look like I pulled this formula from my ass? because I kinda did tbh
+        // (the "Resolution" parameter defines how many "units" there are in a beat)
+        time += (((index - currentIndex) * 60) / (currentBpm * RESOLUTION));
+
+        // Compute timestamp of notes
+        notes.forEach(note => {
+          if (typeof note === 'string') return;
+          if (index <= note.index) {
+            note.time += (((index - currentIndex) * 60) / (currentBpm * RESOLUTION));
+          } else if (!note.found) {
+            note.found = true;
+            note.time += (((note.index - currentIndex) * 60) / (currentBpm * RESOLUTION));
+            note.gapTicks = Math.round(gap * currentBpm * RESOLUTION / 60) + 1;
+          }
+
+          if (note.length) {
+            const endIndex = note.index + note.length;
+            if (index <= endIndex) {
+              note.timeEnd += (((index - currentIndex) * 60) / (currentBpm * RESOLUTION));
+            } else if (note.found !== 'end') {
+              note.found = 'end';
+              note.timeEnd += (((endIndex - currentIndex) * 60) / (currentBpm * RESOLUTION));
+              note.gapTicksTail = Math.round(gap * currentBpm * RESOLUTION / 60) + 1;
+            }
+          }
+        });
+      }
+      currentIndex = index;
+      currentBpm = bpm;
+    });
+
+
+    // Compute remaining notes after last bpm marker
+    notes.forEach(note => {
+      if (typeof note === 'string') return;
+      if (!note.found) {
+        note.found = true;
+        note.time += (((note.index - currentIndex) * 60) / (currentBpm * RESOLUTION));
+        note.gapTicks = Math.round(gap * currentBpm * RESOLUTION / 60) + 1;
+      }
+      if (note.length && note.found !== 'end') {
+        note.found = 'end';
+        note.timeEnd += ((((note.index + note.length) - currentIndex) * 60) / (currentBpm * RESOLUTION));
+        note.gapTicksTail = Math.round(gap * currentBpm * RESOLUTION / 60) + 1;
+      }
+    });
+
+    let txt = '';
+    notes.forEach((noteObj, noteArrayIndex) => {
+      if (typeof noteObj === 'string') return;
+      const { index, note, length, timeEnd, gapTicksTail } = noteObj;
+      if (!length) return;
+      
+      const nextNote = notes.slice(noteArrayIndex).find(n => n.index >= index + length);
+      if (!nextNote) return;
+      if (nextNote.time - timeEnd >= gap) return;
+
+      const newLength = Math.max(0, nextNote.index - index - gapTicksTail);
+      lines[start + noteArrayIndex] = `  ${index} = N ${note} ${newLength}`;
+    });
+  }
+
+  return lines.join('\n');
+};
+</script>
+
+<br />
+.chart file <input type="file" id="chart" /><br />
+Minimum sustain gap <input type="range" id="gap" min="1" max="200" value="70" /> <span id="gap-value">70 ms</span>
+<br /><br /><br />
+<a id="result" download="notes.chart" target="_blank">... Load something up there will you ...</a><br />
+<textarea style="width:800px;height:500px" id="preview" placeholder="Result will appear below"></textarea>
+
+<br /><br />
+
+<script>
+  document.getElementById("chart").addEventListener('change', $event => {
+    const fr = new FileReader();
+    fr.addEventListener('loadend', () => {
+      const converted = convert(fr.result);
+      document.getElementById('result').value = converted;
+      const blob = URL.createObjectURL(new Blob([converted], { type: 'application/chart' }));
+      const link = document.getElementById('result');
+      link.href = blob;
+      link.innerHTML = 'Click to download';
+      document.getElementById('preview').value = converted;
+    });
+    fr.readAsText($event.target.files[0]);
+  });
+  document.getElementById("gap").addEventListener('input', $event => {
+    document.getElementById("gap-value").innerHTML = $event.target.value + " ms";
+  });
+</script>
+</body>
+</html>
